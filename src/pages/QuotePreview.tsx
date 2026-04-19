@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Avatar, Loading, NexovaLogo, StatusChip, Toast } from '../components/UI';
-import { fetchQuoteById, publishQuote, updateQuoteStatus } from '../lib/db';
+import { fetchQuoteById, publishQuote, updateQuoteStatus, sendQuotePromptEmail } from '../lib/db';
 import { useProducts } from '../hooks/useProducts';
+import { useAuth } from '../contexts/AuthContext';
 import { computeQuoteTotals, fmtDate, fmtMoney } from '../lib/utils';
 import type { Quote, QuoteStatus } from '../lib/types';
 
@@ -12,9 +13,11 @@ interface QuotePreviewProps {
 }
 
 export function QuotePreview({ quoteId, onBack }: QuotePreviewProps) {
+  const { vendor } = useAuth();
   const [quote, setQuote] = useState<Quote | null>(null);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
+  const [sendingPrompt, setSendingPrompt] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const { products, loading: loadingP } = useProducts();
 
@@ -69,6 +72,22 @@ export function QuotePreview({ quoteId, onBack }: QuotePreviewProps) {
     }
   };
 
+  const doSendPrompt = async () => {
+    if (!quote || !vendor) return;
+    setSendingPrompt(true);
+    try {
+      // Code splitting: jsPDF solo se descarga cuando se usa
+      const { generatePromptPdf } = await import('../lib/promptPdf');
+      const pdfBase64 = generatePromptPdf(quote, vendor, products);
+      await sendQuotePromptEmail(vendor, quote, pdfBase64);
+      showToast(`✓ Prompt enviado a ${vendor.email}`);
+    } catch (e: any) {
+      showToast('Error: ' + (e?.message || 'no se pudo enviar el prompt'));
+    } finally {
+      setSendingPrompt(false);
+    }
+  };
+
   if (loading || loadingP) return <Loading label="Cargando cotización…" />;
   if (!quote) {
     return (
@@ -114,6 +133,16 @@ export function QuotePreview({ quoteId, onBack }: QuotePreviewProps) {
           </div>
         </div>
         <StatusChip status={quote.status} />
+        <button
+          className="btn btn-soft btn-sm"
+          onClick={doSendPrompt}
+          disabled={sendingPrompt || working}
+          title={`Genera un PDF con un prompt para Claude basado en los requerimientos, y lo envía a ${vendor?.email || 'tu email'}`}
+          style={{ background: 'linear-gradient(135deg, #ede9fe, #ddd6fe)', color: '#6d28d9', borderColor: '#c4b5fd' }}
+        >
+          {sendingPrompt ? <div className="spinner" /> : <Icon name="sparkle" size={13} />}
+          Enviar Prompt
+        </button>
         {quote.status === 'enviada' || quote.status === 'vista' ? (
           <>
             <button

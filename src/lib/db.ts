@@ -303,6 +303,7 @@ export interface CreateQuoteInput {
   delivery_weeks: number;
   payment_terms: string;
   proposal_text: string;
+  requirements?: string;
 }
 
 export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
@@ -339,6 +340,7 @@ export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
       delivery_weeks: input.delivery_weeks,
       payment_terms: input.payment_terms,
       proposal_text: input.proposal_text,
+      requirements: input.requirements || null,
       views: 0,
     } as any)
     .select()
@@ -389,14 +391,12 @@ export async function updateQuoteStatus(
 
 export async function publishQuote(quoteId: string): Promise<string> {
   const token = generatePublicToken();
-  const { error } = await supabase
-    .from('quotes')
-    .update({
-      public_token: token,
-      status: 'enviada',
-      sent_at: new Date().toISOString(),
-    } as any)
-    .eq('id', quoteId);
+  // Usamos RPC SECURITY DEFINER porque los vendedores ya no tienen UPDATE
+  // directo sobre quotes (solo super_admin). La RPC valida ownership internamente.
+  const { error } = await supabase.rpc('vendor_publish_quote', {
+    p_quote_id: quoteId,
+    p_public_token: token,
+  });
   if (error) throw error;
   return token;
 }
@@ -411,7 +411,9 @@ export async function incrementQuoteView(token: string): Promise<void> {
 }
 
 export async function deleteQuote(quoteId: string): Promise<void> {
-  const { error } = await supabase.from('quotes').delete().eq('id', quoteId);
+  // Usamos RPC para que las policies bloqueen a los vendors.
+  // Solo super_admin puede ejecutarla (validación en el backend).
+  const { error } = await supabase.rpc('admin_delete_quote', { p_quote_id: quoteId });
   if (error) throw error;
 }
 
@@ -543,6 +545,11 @@ export interface SendEmailInput {
   html?: string;
   text?: string;
   reply_to?: string;
+  attachments?: {
+    filename: string;
+    content: string; // base64
+    content_type: string;
+  }[];
 }
 
 /**
@@ -682,5 +689,77 @@ Inicia sesión en ${loginUrl} — se te pedirá crear una nueva contraseña.`;
     subject: 'Nexova — Tu cuenta está lista',
     html,
     text,
+  });
+}
+
+/**
+ * Envía el PDF del prompt generado al email del vendor logueado,
+ * para que lo use como input a Claude.
+ */
+export async function sendQuotePromptEmail(
+  vendor: { email: string; name: string },
+  quote: { code: string; client?: { company?: string } | null },
+  pdfBase64: string,
+): Promise<void> {
+  const company = quote.client?.company || 'Cliente';
+  const html = `<!doctype html>
+<html><body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <div style="max-width:560px;margin:32px auto;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.05);">
+    <div style="background:linear-gradient(135deg,#134e4a,#0F766E);color:#fff;padding:24px 28px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.14em;opacity:.8;">NEXOVA</div>
+      <div style="font-size:20px;font-weight:700;margin-top:4px;">Prompt listo para Claude</div>
+    </div>
+    <div style="padding:24px 28px;color:#0f172a;font-size:14.5px;line-height:1.6;">
+      <p style="margin:0 0 14px;">Hola ${vendor.name},</p>
+      <p style="margin:0 0 14px;">
+        Adjunto encontrarás el PDF con el <strong>prompt estructurado</strong> para que Claude
+        te ayude a construir el proyecto de <strong>${company}</strong>
+        (cotización <strong>${quote.code}</strong>).
+      </p>
+      <p style="margin:0 0 14px;">El prompt incluye:</p>
+      <ul style="margin:0 0 14px;padding-left:20px;color:#334155;">
+        <li>Instrucciones de rol (Senior Full-Stack Developer)</li>
+        <li>Best practices mandatorias de código, UX y arquitectura</li>
+        <li>Requerimientos originales del cliente</li>
+        <li>Productos y módulos cotizados</li>
+        <li>Criterios de entrega por fases</li>
+      </ul>
+      <p style="margin:0 0 14px;">
+        <strong>Cómo usarlo:</strong> abre el PDF, copia todo el contenido del prompt y pégalo
+        en una nueva conversación con Claude. El modelo te devolverá un plan técnico que
+        puedes iterar antes de pedir el código.
+      </p>
+      <p style="margin:18px 0 0;font-size:12.5px;color:#64748b;">
+        Este PDF fue generado automáticamente desde el panel de Nexova.
+      </p>
+    </div>
+    <div style="padding:14px 28px;background:#f1f5f9;color:#64748b;font-size:11.5px;text-align:center;">
+      Nexova · Panel comercial
+    </div>
+  </div>
+</body></html>`;
+
+  const text = `Hola ${vendor.name},
+
+Adjunto el PDF con el prompt estructurado para construir el proyecto de ${company} (cotización ${quote.code}) usando Claude.
+
+Incluye instrucciones de rol, best practices, requerimientos del cliente y productos cotizados.
+
+Cómo usarlo: abre el PDF, copia el prompt completo, pégalo en Claude y recibirás un plan técnico.
+
+— Nexova`;
+
+  await sendEmail({
+    to: vendor.email,
+    subject: `Nexova · Prompt para construir ${company} (${quote.code})`,
+    html,
+    text,
+    attachments: [
+      {
+        filename: `prompt-${quote.code}.pdf`,
+        content: pdfBase64,
+        content_type: 'application/pdf',
+      },
+    ],
   });
 }

@@ -234,6 +234,7 @@ export function Wizard({ onCancel, onFinish }: WizardProps) {
         delivery_weeks: deliveryWeeks,
         payment_terms: paymentTerms,
         proposal_text: proposalText,
+        requirements: requirements,
       });
       onFinish(quote.id);
     } catch (e: any) {

@@ -107,6 +107,7 @@ export interface Quote {
   delivery_weeks: number;
   payment_terms: string | null;
   proposal_text: string | null;
+  requirements: string | null;
   views: number;
   public_token: string | null;
   created_at: string;

@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react';
 import { Icon } from '../components/Icon';
-import { Avatar, Loading, StatusChip, Topbar } from '../components/UI';
+import { Avatar, Loading, Modal, StatusChip, Toast, Topbar } from '../components/UI';
 import { useQuotes } from '../hooks/useQuotes';
 import { useProducts } from '../hooks/useProducts';
 import { useAuth } from '../contexts/AuthContext';
 import { computeQuoteTotals, fmtDate, fmtMoney, STATUS_MAP } from '../lib/utils';
-import type { QuoteStatus } from '../lib/types';
+import { deleteQuote } from '../lib/db';
+import type { Quote, QuoteStatus } from '../lib/types';
 
 interface QuotesProps {
   onOpenQuote: (id: string) => void;
@@ -24,10 +25,33 @@ const STATUS_FILTERS: (QuoteStatus | 'all')[] = [
 
 export function Quotes({ onOpenQuote, onNewQuote }: QuotesProps) {
   const { isSuperAdmin } = useAuth();
-  const { quotes, loading: loadingQ, error: errorQ } = useQuotes();
+  const { quotes, loading: loadingQ, error: errorQ, reload } = useQuotes();
   const { products, loading: loadingP } = useProducts();
   const [filter, setFilter] = useState<QuoteStatus | 'all'>('all');
   const [query, setQuery] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState<Quote | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+
+  const showToast = (m: string) => {
+    setToast(m);
+    setTimeout(() => setToast(null), 2500);
+  };
+
+  const handleDelete = async () => {
+    if (!confirmDelete) return;
+    setDeleting(true);
+    try {
+      await deleteQuote(confirmDelete.id);
+      showToast(`✓ Cotización ${confirmDelete.code} eliminada`);
+      setConfirmDelete(null);
+      await reload();
+    } catch (e: any) {
+      showToast('Error: ' + (e?.message || 'no se pudo eliminar'));
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const visibleQuotes = useMemo(() => {
     return quotes.filter((q) => {
@@ -232,7 +256,23 @@ export function Quotes({ onOpenQuote, onNewQuote }: QuotesProps) {
                     <td style={{ padding: '14px 12px', color: 'var(--ink-500)', fontSize: 12.5 }}>
                       {fmtDate(q.created_at)}
                     </td>
-                    <td style={{ padding: '14px 12px', color: 'var(--ink-400)' }}>→</td>
+                    <td
+                      style={{ padding: '14px 12px', color: 'var(--ink-400)', textAlign: 'right' }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {isSuperAdmin && q.status === 'borrador' ? (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setConfirmDelete(q)}
+                          title="Eliminar borrador"
+                          style={{ color: '#dc2626', padding: '4px 8px' }}
+                        >
+                          <Icon name="trash" size={14} />
+                        </button>
+                      ) : (
+                        <span>→</span>
+                      )}
+                    </td>
                   </tr>
                 );
               })}
@@ -269,6 +309,40 @@ export function Quotes({ onOpenQuote, onNewQuote }: QuotesProps) {
           </table>
         </div>
       </div>
+      {/* Modal: confirmar eliminación */}
+      <Modal open={!!confirmDelete} onClose={() => setConfirmDelete(null)} width={420}>
+        <div style={{ padding: 24 }}>
+          <h3 className="h-display" style={{ margin: '0 0 6px', fontSize: 18 }}>
+            ¿Eliminar esta cotización?
+          </h3>
+          {confirmDelete && (
+            <p style={{ margin: '0 0 18px', fontSize: 13.5, color: 'var(--ink-600)', lineHeight: 1.5 }}>
+              Vas a eliminar <strong>{confirmDelete.code}</strong> de{' '}
+              <strong>{confirmDelete.client?.company}</strong>. Esta acción no se puede deshacer.
+            </p>
+          )}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button
+              className="btn btn-ghost"
+              onClick={() => setConfirmDelete(null)}
+              disabled={deleting}
+            >
+              Cancelar
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={handleDelete}
+              disabled={deleting}
+              style={{ background: '#dc2626' }}
+            >
+              {deleting ? <div className="spinner" /> : <Icon name="trash" size={14} />}
+              Eliminar
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {toast && <Toast message={toast} />}
     </div>
   );
 }
