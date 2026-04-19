@@ -56,6 +56,43 @@ export interface QuoteTotals {
   total: number;
 }
 
+/**
+ * Representa una fila de cargo recurrente asociada a un item de la cotización.
+ * Se genera solo si el producto subyacente tiene recurring_name Y recurring_price > 0.
+ * El unit_price ya viene multiplicado por qty del item (más sites = más suscripciones).
+ */
+export interface RecurringCharge {
+  product_id: string;
+  product_name: string;
+  recurring_name: string;
+  unit_price: number;
+  unit: string;
+  qty: number;
+}
+
+export function getRecurringCharges(
+  items: QuoteItem[],
+  products: Product[],
+): RecurringCharge[] {
+  const rows: RecurringCharge[] = [];
+  for (const it of items) {
+    const p = products.find((x) => x.id === it.product_id);
+    if (!p) continue;
+    const name = (p.recurring_name || '').trim();
+    const price = Number(p.recurring_price || 0);
+    if (!name || price <= 0) continue; // sin recurrente configurado → se omite
+    rows.push({
+      product_id: p.id,
+      product_name: p.name,
+      recurring_name: name,
+      unit_price: price * (it.qty || 1),
+      unit: (p.recurring_unit || 'mes').trim() || 'mes',
+      qty: it.qty || 1,
+    });
+  }
+  return rows;
+}
+
 export function computeQuoteTotals(
   items: QuoteItem[],
   products: Product[],

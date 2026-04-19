@@ -159,7 +159,7 @@ export function Login() {
                 textTransform: 'uppercase',
               }}
             >
-              Panel comercial · v2.14
+              Panel comercial · v2.17
             </div>
             <h2
               className="h-display"

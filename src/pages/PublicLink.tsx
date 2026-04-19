@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Loading, NexovaLogo } from '../components/UI';
 import { fetchQuoteByPublicToken, incrementQuoteView, fetchProductsWithModules, fetchOrgSettings } from '../lib/db';
-import { computeQuoteTotals, fmtDate, fmtMoney, fmtUSD } from '../lib/utils';
+import { computeQuoteTotals, fmtDate, fmtMoney, fmtUSD, getRecurringCharges } from '../lib/utils';
 import type { OrganizationSettings, Product, Quote } from '../lib/types';
 
 export function PublicLink({ token }: { token: string }) {
@@ -55,6 +55,7 @@ export function PublicLink({ token }: { token: string }) {
   }
 
   const totals = computeQuoteTotals(quote.items || [], products, quote.discount);
+  const recurring = getRecurringCharges(quote.items || [], products);
 
   return (
     <div
@@ -251,46 +252,79 @@ export function PublicLink({ token }: { token: string }) {
           >
             {(() => {
               const tc = orgSettings?.exchange_rate ? Number(orgSettings.exchange_rate) : null;
-              const hasTc = tc && tc > 0;
+              const hasTc = !!(tc && tc > 0);
+              // Grid: label | S/ | USD (si hay TC). Si no hay TC, solo label | S/.
+              const gridCols = hasTc ? '1fr auto auto' : '1fr auto';
+              const headerStyle = {
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: '.1em',
+                opacity: 0.45,
+                textAlign: 'right' as const,
+                paddingBottom: 4,
+              };
               return (
                 <>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
-                    <span style={{ opacity: 0.7 }}>Subtotal</span>
-                    <span>
-                      {fmtMoney(totals.subtotal)}
-                      {hasTc && (
-                        <span style={{ opacity: 0.55, marginLeft: 8, fontSize: 12 }}>
-                          · {fmtUSD(totals.subtotal, tc)}
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                  {quote.discount > 0 && (
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        fontSize: 13,
-                        marginTop: 6,
-                        color: 'var(--teal-300)',
-                      }}
-                    >
-                      <span>Descuento ({quote.discount}%)</span>
-                      <span>- {fmtMoney(totals.discountAmt)}</span>
-                    </div>
-                  )}
                   <div
                     style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
+                      display: 'grid',
+                      gridTemplateColumns: gridCols,
+                      columnGap: 20,
+                      rowGap: 6,
                       fontSize: 13,
-                      marginTop: 6,
-                      opacity: 0.7,
+                      alignItems: 'baseline',
                     }}
                   >
-                    <span>IGV (18%)</span>
-                    <span>{fmtMoney(totals.igv)}</span>
+                    {/* Headers de columna */}
+                    <span />
+                    <span style={headerStyle}>S/</span>
+                    {hasTc && <span style={headerStyle}>USD</span>}
+
+                    {/* Subtotal */}
+                    <span style={{ opacity: 0.7 }}>Subtotal</span>
+                    <span style={{ textAlign: 'right' }}>{fmtMoney(totals.subtotal)}</span>
+                    {hasTc && (
+                      <span style={{ textAlign: 'right', opacity: 0.55 }}>
+                        {fmtUSD(totals.subtotal, tc)}
+                      </span>
+                    )}
+
+                    {/* Descuento */}
+                    {quote.discount > 0 && (
+                      <>
+                        <span style={{ color: 'var(--teal-300)' }}>
+                          Descuento ({quote.discount}%)
+                        </span>
+                        <span style={{ textAlign: 'right', color: 'var(--teal-300)' }}>
+                          - {fmtMoney(totals.discountAmt)}
+                        </span>
+                        {hasTc && (
+                          <span
+                            style={{
+                              textAlign: 'right',
+                              color: 'var(--teal-300)',
+                              opacity: 0.8,
+                            }}
+                          >
+                            - {fmtUSD(totals.discountAmt, tc)}
+                          </span>
+                        )}
+                      </>
+                    )}
+
+                    {/* IGV */}
+                    <span style={{ opacity: 0.7 }}>IGV (18%)</span>
+                    <span style={{ textAlign: 'right', opacity: 0.7 }}>
+                      {fmtMoney(totals.igv)}
+                    </span>
+                    {hasTc && (
+                      <span style={{ textAlign: 'right', opacity: 0.5 }}>
+                        {fmtUSD(totals.igv, tc)}
+                      </span>
+                    )}
                   </div>
+
+                  {/* Total — destacado, en bloque separado */}
                   <div
                     style={{
                       display: 'flex',
@@ -316,13 +350,13 @@ export function PublicLink({ token }: { token: string }) {
                         <div
                           style={{
                             fontFamily: 'var(--font-display)',
-                            fontSize: 14,
-                            fontWeight: 600,
+                            fontSize: 13,
+                            fontWeight: 500,
                             opacity: 0.6,
-                            marginTop: 2,
+                            marginTop: 4,
                           }}
                         >
-                          {fmtUSD(totals.total, tc)}
+                          Referencial en dólares - {fmtUSD(totals.total, tc)}
                         </div>
                       )}
                     </div>
@@ -331,6 +365,98 @@ export function PublicLink({ token }: { token: string }) {
               );
             })()}
           </div>
+
+          {/* Pagos recurrentes (cargos periódicos posteriores a la implementación) */}
+          {recurring.length > 0 && (() => {
+            const tc = orgSettings?.exchange_rate ? Number(orgSettings.exchange_rate) : null;
+            const hasTc = !!(tc && tc > 0);
+            return (
+              <div
+                style={{
+                  marginTop: 20,
+                  padding: 18,
+                  background: 'var(--ink-50)',
+                  borderRadius: 10,
+                  borderLeft: '3px solid #F59E0B',
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 14,
+                    fontWeight: 700,
+                    color: 'var(--ink-900)',
+                    marginBottom: 4,
+                  }}
+                >
+                  Pagos recurrentes
+                </div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: 'var(--ink-500)',
+                    marginBottom: 12,
+                    lineHeight: 1.45,
+                  }}
+                >
+                  Cargos periódicos posteriores a la implementación. No están incluidos en el
+                  total de la inversión inicial.
+                </div>
+                {recurring.map((r, idx) => (
+                  <div
+                    key={r.product_id}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'flex-start',
+                      gap: 14,
+                      padding: '10px 0',
+                      borderTop: idx > 0 ? '1px dashed var(--ink-200)' : 'none',
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 13.5, color: 'var(--ink-900)' }}>
+                        {r.recurring_name}
+                        {r.qty > 1 && (
+                          <span style={{ color: 'var(--ink-500)', fontWeight: 500 }}>
+                            {' '}
+                            × {r.qty}
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: 'var(--ink-500)', marginTop: 2 }}>
+                        {r.product_name}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div
+                        style={{
+                          fontFamily: 'var(--font-display)',
+                          fontSize: 14,
+                          fontWeight: 700,
+                          color: 'var(--ink-900)',
+                        }}
+                      >
+                        {fmtMoney(r.unit_price)} / {r.unit}
+                      </div>
+                      {hasTc && (
+                        <div
+                          style={{
+                            fontFamily: 'var(--font-display)',
+                            fontSize: 12,
+                            fontWeight: 500,
+                            color: 'var(--ink-500)',
+                            marginTop: 2,
+                          }}
+                        >
+                          {fmtUSD(r.unit_price, tc!)} / {r.unit}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
 
           <div
             style={{

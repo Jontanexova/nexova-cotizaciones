@@ -4,7 +4,7 @@ import { Avatar, Loading, NexovaLogo, StatusChip, Toast } from '../components/UI
 import { fetchQuoteById, publishQuote, updateQuoteStatus, sendQuotePromptEmail, fetchOrgSettings, archiveQuote, deleteQuote } from '../lib/db';
 import { useProducts } from '../hooks/useProducts';
 import { useAuth } from '../contexts/AuthContext';
-import { computeQuoteTotals, fmtDate, fmtMoney, fmtUSD } from '../lib/utils';
+import { computeQuoteTotals, fmtDate, fmtMoney, fmtUSD, getRecurringCharges } from '../lib/utils';
 import type { OrganizationSettings, Quote, QuoteStatus } from '../lib/types';
 
 interface QuotePreviewProps {
@@ -20,6 +20,7 @@ export function QuotePreview({ quoteId, onBack, onEditQuote }: QuotePreviewProps
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [sendingPrompt, setSendingPrompt] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const { products, loading: loadingP } = useProducts();
 
@@ -94,6 +95,21 @@ export function QuotePreview({ quoteId, onBack, onEditQuote }: QuotePreviewProps
     }
   };
 
+  const doDownload = async () => {
+    if (!quote) return;
+    setDownloading(true);
+    try {
+      // Code splitting: jsPDF solo se descarga cuando se usa.
+      const { downloadQuotePdf } = await import('../lib/quotePdf');
+      downloadQuotePdf(quote, products, orgSettings);
+      showToast('✓ Cotización descargada');
+    } catch (e: any) {
+      showToast('Error: ' + (e?.message || 'no se pudo generar el PDF'));
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   // Acciones de super_admin sobre cotizaciones aceptadas
   const doRevert = async () => {
     if (!quote) return;
@@ -163,6 +179,7 @@ export function QuotePreview({ quoteId, onBack, onEditQuote }: QuotePreviewProps
   }
 
   const totals = computeQuoteTotals(quote.items || [], products, quote.discount);
+  const recurring = getRecurringCharges(quote.items || [], products);
   const publicUrl = quote.public_token
     ? `${window.location.origin}/public/${quote.public_token}`
     : null;
@@ -195,6 +212,19 @@ export function QuotePreview({ quoteId, onBack, onEditQuote }: QuotePreviewProps
           </div>
         </div>
         <StatusChip status={quote.status} />
+        {(['enviada', 'vista', 'negociacion', 'aceptada', 'rechazada'] as QuoteStatus[]).includes(
+          quote.status,
+        ) && (
+          <button
+            className="btn btn-soft btn-sm"
+            onClick={doDownload}
+            disabled={downloading || working}
+            title="Descargar cotización como PDF para compartir con el cliente"
+          >
+            {downloading ? <div className="spinner" /> : <Icon name="download" size={13} />}
+            Descargar
+          </button>
+        )}
         {isSuperAdmin && !quote.archived && (
           <button
             className="btn btn-soft btn-sm"
@@ -555,7 +585,7 @@ export function QuotePreview({ quoteId, onBack, onEditQuote }: QuotePreviewProps
                       color: 'var(--ink-500)',
                     }}
                   >
-                    <span>Equivalente en USD</span>
+                    <span>Referencial en dólares</span>
                     <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
                       {fmtUSD(totals.total, Number(orgSettings.exchange_rate))}
                     </span>
@@ -564,6 +594,98 @@ export function QuotePreview({ quoteId, onBack, onEditQuote }: QuotePreviewProps
               </div>
             </div>
           </div>
+
+          {/* Pagos recurrentes (cargos periódicos posteriores a la implementación) */}
+          {recurring.length > 0 && (() => {
+            const tc = orgSettings?.exchange_rate ? Number(orgSettings.exchange_rate) : null;
+            const hasTc = !!(tc && tc > 0);
+            return (
+              <div
+                style={{
+                  marginBottom: 24,
+                  padding: 16,
+                  background: 'var(--ink-50)',
+                  borderRadius: 10,
+                  borderLeft: '3px solid #F59E0B',
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: 'var(--ink-900)',
+                    marginBottom: 3,
+                  }}
+                >
+                  Pagos recurrentes
+                </div>
+                <div
+                  style={{
+                    fontSize: 11.5,
+                    color: 'var(--ink-500)',
+                    marginBottom: 10,
+                    lineHeight: 1.45,
+                  }}
+                >
+                  Cargos periódicos posteriores a la implementación. No están incluidos en el
+                  total.
+                </div>
+                {recurring.map((r, idx) => (
+                  <div
+                    key={r.product_id}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'flex-start',
+                      gap: 14,
+                      padding: '8px 0',
+                      borderTop: idx > 0 ? '1px dashed var(--ink-200)' : 'none',
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 12.5, color: 'var(--ink-900)' }}>
+                        {r.recurring_name}
+                        {r.qty > 1 && (
+                          <span style={{ color: 'var(--ink-500)', fontWeight: 500 }}>
+                            {' '}
+                            × {r.qty}
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--ink-500)', marginTop: 1 }}>
+                        {r.product_name}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div
+                        style={{
+                          fontFamily: 'var(--font-display)',
+                          fontSize: 13,
+                          fontWeight: 700,
+                          color: 'var(--ink-900)',
+                        }}
+                      >
+                        {fmtMoney(r.unit_price)} / {r.unit}
+                      </div>
+                      {hasTc && (
+                        <div
+                          style={{
+                            fontFamily: 'var(--font-display)',
+                            fontSize: 11.5,
+                            fontWeight: 500,
+                            color: 'var(--ink-500)',
+                            marginTop: 1,
+                          }}
+                        >
+                          {fmtUSD(r.unit_price, tc!)} / {r.unit}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
 
           <div
             style={{
