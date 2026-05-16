@@ -1488,7 +1488,20 @@ Cómo usarlo: abre el PDF, copia el prompt completo, pégalo en Claude y recibir
 // ═══════════════════════════════════════════════════════════════════════
 
 export async function fetchCurrentExchangeRate(): Promise<number | null> {
-  // Usamos la RPC para obtener el rate vigente
+  // v2.28: la UI de Ajustes → TC guarda el TC en organization_settings.exchange_rate
+  // (via updateExchangeRate), NO en la tabla exchange_rates. Esta función debe
+  // mirar primero esa fuente para que el Wizard de cotización vea lo que el
+  // admin acaba de configurar. Solo si está vacío, caemos al historial
+  // de exchange_rates por compat.
+  const { data: org } = await supabase
+    .from('organization_settings')
+    .select('exchange_rate')
+    .limit(1)
+    .maybeSingle();
+  if (org?.exchange_rate && Number(org.exchange_rate) > 0) {
+    return Number(org.exchange_rate);
+  }
+  // Fallback: RPC sobre la tabla exchange_rates (historial)
   const { data, error } = await supabase.rpc('get_current_exchange_rate');
   if (error) throw error;
   return data ? Number(data) : null;
