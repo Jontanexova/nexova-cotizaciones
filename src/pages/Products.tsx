@@ -883,7 +883,11 @@ function ModuleFormModal({
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
             <div className="nx-field">
-              <label className="nx-label">Precio ({symbol})</label>
+              <label className="nx-label">
+                {productRequiresRecurring
+                  ? `Setup único (opcional) (${symbol})`
+                  : `Precio (${symbol})`}
+              </label>
               <input
                 className="nx-input"
                 type="number"
@@ -892,8 +896,18 @@ function ModuleFormModal({
                 value={form.price}
                 onChange={(e) => setForm({ ...form, price: Number(e.target.value) })}
               />
-              <div style={{ fontSize: 10.5, color: 'var(--ink-500)', marginTop: 4 }}>
-                Hereda la moneda <strong>{productCurrency}</strong> del producto padre.
+              <div style={{ fontSize: 10.5, color: 'var(--ink-500)', marginTop: 4, lineHeight: 1.5 }}>
+                {productRequiresRecurring ? (
+                  <>
+                    Costo <strong>único de instalación/setup</strong> que se cobra una sola vez. Si
+                    el módulo solo tiene cargo recurrente, deja este campo en <strong>0</strong>.
+                    El precio mensual se configura abajo en "Renovación mensual".
+                  </>
+                ) : (
+                  <>
+                    Hereda la moneda <strong>{productCurrency}</strong> del producto padre.
+                  </>
+                )}
               </div>
             </div>
             <div className="nx-field">
@@ -953,6 +967,29 @@ function ModuleFormModal({
               </div>
             </div>
           )}
+
+          {/* v2.28: warning si el módulo tiene setup Y recurring — causa duplicación en cotización */}
+          {productRequiresRecurring &&
+            Number(form.price) > 0 &&
+            Number(form.recurring_monthly_price) > 0 && (
+              <div
+                style={{
+                  padding: '10px 12px',
+                  background: '#FEF3C7',
+                  border: '1px solid #F59E0B',
+                  borderRadius: 8,
+                  fontSize: 11.5,
+                  color: '#92400E',
+                  lineHeight: 1.5,
+                }}
+              >
+                ⚠ <strong>Atención:</strong> este módulo tiene Setup ({symbol} {Number(form.price).toFixed(2)})
+                Y Renovación mensual ({symbol} {Number(form.recurring_monthly_price).toFixed(2)}).
+                Al cotizar se cobrarán <strong>ambos</strong>: el setup una sola vez + las
+                renovaciones recurrentes. Si querías solo cargo recurrente, deja el Setup en{' '}
+                <strong>0</strong>.
+              </div>
+            )}
 
           <label
             style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}
