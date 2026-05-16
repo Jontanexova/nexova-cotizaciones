@@ -183,9 +183,17 @@ export function getRecurringCharges(
     const qty = it.qty || 1;
     // v2.28: los módulos heredan la moneda del producto. Convertimos cada
     // precio mensual a la moneda del quote antes de calcular periodo/renewal.
+    // Si la conversión falla por falta de TC (cotización legada con items en
+    // otra moneda), ese cargo aporta 0 — el caller agregado decide qué hacer.
+    // El Wizard tiene needsExchangeRate aparte para bloquear el submit.
     const productCurrency = p.currency || 'PEN';
-    const toQuote = (n: number) =>
-      convertAmount(n, productCurrency, quoteCurrency, exchangeRate);
+    const toQuote = (n: number): number => {
+      try {
+        return convertAmount(n, productCurrency, quoteCurrency, exchangeRate);
+      } catch {
+        return 0;
+      }
+    };
 
     const modulesWithRecurring = (it.modules || [])
       .map((selMod) => {
@@ -281,7 +289,15 @@ export function computeQuoteTotals(
       const m = p.modules?.find((x) => x.id === selMod.module_id);
       if (m) lineNative += Number(m.price || 0);
     }
-    const line = convertAmount(lineNative, p.currency || 'PEN', quoteCurrency, exchangeRate);
+    // v2.28: nunca throw — si falta TC para una conversión necesaria, ese item
+    // aporta 0. Esto protege a Dashboard/Quotes/PDF de cotizaciones legadas que
+    // tienen items en moneda distinta al quote sin exchange_rate snap.
+    let line = 0;
+    try {
+      line = convertAmount(lineNative, p.currency || 'PEN', quoteCurrency, exchangeRate);
+    } catch {
+      line = 0;
+    }
     subtotal += line * (it.qty || 1);
   }
 
