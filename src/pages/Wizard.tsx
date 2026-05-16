@@ -8,14 +8,22 @@ import {
   createQuote,
   fetchClientByRuc,
   fetchClientsWithStats,
+  fetchCurrentExchangeRate,
   logAiAnalysis,
   updateQuote,
   validateRucViaEdgeFunction,
   type AiAnalysisInput,
   type ClientWithStats,
 } from '../lib/db';
-import type { Product, Quote, QuoteItemModule, RecurringCycle } from '../lib/types';
-import { fmtMoney, lineItemPrice, MAX_GIFT_MONTHS, WARN_GIFT_MONTHS_THRESHOLD } from '../lib/utils';
+import type { Currency, Product, Quote, QuoteItemModule, RecurringCycle } from '../lib/types';
+import {
+  computeQuoteTotals,
+  convertAmount,
+  fmtMoney,
+  lineItemPrice,
+  MAX_GIFT_MONTHS,
+  WARN_GIFT_MONTHS_THRESHOLD,
+} from '../lib/utils';
 
 interface WizardProps {
   onCancel: () => void;
@@ -223,14 +231,51 @@ export function Wizard({ onCancel, onFinish, quote }: WizardProps) {
   const [scopeSummary, setScopeSummary] = useState(quote?.scope_summary ?? '');
   const [modalitySummary, setModalitySummary] = useState(quote?.modality_summary ?? '');
 
-  const subtotal = useMemo(
-    () => items.reduce((sum, it) => sum + lineItemPrice(it, products), 0),
-    [items, products]
-  );
-  const discountAmt = subtotal * (discount / 100);
-  const afterDisc = subtotal - discountAmt;
-  const igv = afterDisc * 0.18;
-  const total = afterDisc + igv;
+  // v2.28 — moneda de la cotización y tipo de cambio para convertir productos
+  // en otra moneda. En edición, se precarga del quote; en creación, default 'PEN'
+  // y el TC se hidrata del último valor configurado en organization_settings.
+  const [currency, setCurrency] = useState<Currency>(quote?.currency || 'PEN');
+  const [exchangeRate, setExchangeRate] = useState<number | null>(quote?.exchange_rate ?? null);
+  useEffect(() => {
+    if (exchangeRate != null) return; // ya hay TC (modo edición o cargado)
+    fetchCurrentExchangeRate()
+      .then((r) => setExchangeRate(r))
+      .catch(() => {
+        /* no-op: el Wizard valida más tarde si el TC falta y hay mezcla */
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ¿Hay items en moneda distinta a la del quote? Si sí, requerimos TC.
+  const hasMixedCurrency = useMemo(() => {
+    return items.some((it) => {
+      const p = products.find((x) => x.id === it.product_id);
+      return p && (p.currency || 'PEN') !== currency;
+    });
+  }, [items, products, currency]);
+
+  const needsExchangeRate = hasMixedCurrency && (!exchangeRate || exchangeRate <= 0);
+
+  const totals = useMemo(() => {
+    try {
+      // Adaptamos items locales al shape esperado por computeQuoteTotals.
+      const quoteItems = items.map((it, i) => ({
+        id: '',
+        quote_id: '',
+        sort_order: i,
+        product_id: it.product_id,
+        qty: it.qty,
+        modules: it.modules,
+        recurring_billing_cycle: it.recurring_billing_cycle,
+        recurring_gift_months: it.recurring_gift_months,
+      }));
+      return computeQuoteTotals(quoteItems, products, discount, currency, exchangeRate);
+    } catch {
+      // Falta TC con mezcla: el banner ya avisa al vendor; devolvemos ceros
+      // para no romper el render.
+      return { subtotal: 0, discountAmt: 0, afterDisc: 0, igv: 0, total: 0 };
+    }
+  }, [items, products, discount, currency, exchangeRate]);
+  const { subtotal, discountAmt, igv, total } = totals;
 
   // v2.27: signature actual de items y flag de narrativas desactualizadas
   // (para mostrar banner "Regenerar texto" en Step 4 cuando el vendedor
@@ -767,6 +812,8 @@ export function Wizard({ onCancel, onFinish, quote }: WizardProps) {
         // `terms` se edita solo desde QuotePreview, no desde el Wizard:
         // al crear/editar mantenemos el valor actual (o null en cotización nueva).
         terms: isEditing ? (quote?.terms ?? null) : null,
+        // v2.28 — moneda de la cotización (snapshot en quotes.currency).
+        currency,
       };
 
       const result = isEditing
@@ -799,7 +846,7 @@ export function Wizard({ onCancel, onFinish, quote }: WizardProps) {
     return true;
   });
 
-  const canSubmit = items.length > 0 && !submitting && recurringValid;
+  const canSubmit = items.length > 0 && !submitting && recurringValid && !needsExchangeRate;
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--ink-50)' }}>
@@ -936,6 +983,11 @@ export function Wizard({ onCancel, onFinish, quote }: WizardProps) {
             onRegenerate={() => {
               void runAiAnalysis({ regenerateOnly: true });
             }}
+            currency={currency}
+            setCurrency={setCurrency}
+            exchangeRate={exchangeRate}
+            hasMixedCurrency={hasMixedCurrency}
+            needsExchangeRate={needsExchangeRate}
           />
         )}
       </div>
@@ -1514,6 +1566,12 @@ function Step4Review(props: {
   hasStaleNarratives: boolean;
   regenerating: boolean;
   onRegenerate: () => void;
+  // v2.28 — moneda + TC para conversiones mixtas
+  currency: Currency;
+  setCurrency: (c: Currency) => void;
+  exchangeRate: number | null;
+  hasMixedCurrency: boolean;
+  needsExchangeRate: boolean;
 }) {
   const {
     products,
@@ -1545,6 +1603,11 @@ function Step4Review(props: {
     hasStaleNarratives,
     regenerating,
     onRegenerate,
+    currency,
+    setCurrency,
+    exchangeRate,
+    hasMixedCurrency,
+    needsExchangeRate,
   } = props;
 
   const updateQty = (idx: number, qty: number) => {
@@ -1811,6 +1874,50 @@ function Step4Review(props: {
         </div>
       )}
 
+      {/* v2.28 — moneda de la cotización */}
+      <div className="nx-card nx-card-padded">
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
+          <div className="nx-field" style={{ minWidth: 200, margin: 0 }}>
+            <label className="nx-label">Moneda de la cotización</label>
+            <select
+              className="nx-input"
+              value={currency}
+              onChange={(e) => setCurrency(e.target.value as Currency)}
+            >
+              <option value="PEN">PEN — Soles (S/)</option>
+              <option value="USD">USD — Dólares ($)</option>
+            </select>
+          </div>
+          {hasMixedCurrency && (
+            <div
+              style={{
+                flex: 1,
+                minWidth: 240,
+                fontSize: 12.5,
+                color: needsExchangeRate ? '#991b1b' : 'var(--ink-600)',
+                background: needsExchangeRate ? '#fef2f2' : 'var(--ink-50)',
+                border: needsExchangeRate ? '1px solid #fecaca' : '1px solid var(--ink-200)',
+                padding: '10px 12px',
+                borderRadius: 8,
+                lineHeight: 1.5,
+              }}
+            >
+              {needsExchangeRate ? (
+                <>
+                  <strong>Falta tipo de cambio.</strong> Hay productos en otra moneda y no hay TC
+                  configurado. Configúralo en Ajustes &rarr; Tipo de cambio antes de continuar.
+                </>
+              ) : (
+                <>
+                  Esta cotización mezcla productos en distintas monedas. Los montos se convierten a{' '}
+                  <strong>{currency}</strong> usando el TC vigente: <strong>1 USD = S/ {exchangeRate?.toFixed(4)}</strong>.
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
       <div className="nx-card nx-card-padded">
         <h3 className="h-display" style={{ margin: '0 0 14px', fontSize: 17, fontWeight: 700 }}>
           Productos y módulos
@@ -1818,7 +1925,15 @@ function Step4Review(props: {
         {items.map((it, idx) => {
           const p = products.find((x) => x.id === it.product_id);
           if (!p) return null;
-          const linePrice = lineItemPrice(it, products);
+          let linePrice = 0;
+          try {
+            linePrice = lineItemPrice(it, products, currency, exchangeRate);
+          } catch {
+            // falta TC con mezcla — el banner global ya avisa
+            linePrice = 0;
+          }
+          const productCurrency = (p?.currency || 'PEN') as Currency;
+          const isCrossCurrency = productCurrency !== currency;
           return (
             <div
               key={idx}
@@ -1831,7 +1946,15 @@ function Step4Review(props: {
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 600, color: 'var(--ink-900)' }}>{p.name}</div>
                   <div style={{ fontSize: 12, color: 'var(--ink-500)' }}>
-                    {fmtMoney(p.base_price)} / {p.unit}
+                    {fmtMoney(p.base_price, productCurrency)} / {p.unit}
+                    {isCrossCurrency && exchangeRate && exchangeRate > 0 && (
+                      <span style={{ marginLeft: 6, color: 'var(--ink-400)' }}>
+                        (≈ {fmtMoney(
+                          convertAmount(p.base_price, productCurrency, currency, exchangeRate),
+                          currency,
+                        )})
+                      </span>
+                    )}
                   </div>
                 </div>
                 <input
@@ -1851,7 +1974,7 @@ function Step4Review(props: {
                     fontSize: 14.5,
                   }}
                 >
-                  {fmtMoney(linePrice)}
+                  {fmtMoney(linePrice, currency)}
                 </div>
                 <button
                   onClick={() => removeItem(idx)}
@@ -1901,7 +2024,7 @@ function Step4Review(props: {
                             color: active ? 'var(--teal-700)' : 'var(--ink-500)',
                           }}
                         >
-                          +{fmtMoney(m.price)}
+                          +{fmtMoney(m.price, productCurrency)}
                         </span>
                       </label>
                     );
@@ -1947,7 +2070,7 @@ function Step4Review(props: {
                       <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ink-700)', marginBottom: 8 }}>
                         Renovación · {label}{' '}
                         <span style={{ fontWeight: 500, color: 'var(--ink-500)' }}>
-                          ({fmtMoney(monthlyUnit)}/mes)
+                          ({fmtMoney(monthlyUnit, currency)}/mes)
                         </span>
                       </div>
                       <div style={{ display: 'flex', gap: 6, marginBottom: cycle === 'annual' ? 8 : 0 }}>
@@ -1967,7 +2090,7 @@ function Step4Review(props: {
                             fontFamily: 'inherit',
                           }}
                         >
-                          Mensual · {fmtMoney(monthlyUnit)}/mes
+                          Mensual · {fmtMoney(monthlyUnit, currency)}/mes
                         </button>
                         <button
                           type="button"
@@ -1985,7 +2108,7 @@ function Step4Review(props: {
                             fontFamily: 'inherit',
                           }}
                         >
-                          Anual · {fmtMoney(annualFirst)}/año
+                          Anual · {fmtMoney(annualFirst, currency)}/año
                         </button>
                       </div>
                       {cycle === 'annual' && (
@@ -2011,7 +2134,7 @@ function Step4Review(props: {
                               }}
                             />
                             <span style={{ color: 'var(--ink-500)' }}>
-                              · Renovación año 2+: {fmtMoney(annualRenewal)}/año
+                              · Renovación año 2+: {fmtMoney(annualRenewal, currency)}/año
                             </span>
                           </div>
                           {gift > WARN_GIFT_MONTHS_THRESHOLD && (
@@ -2035,12 +2158,23 @@ function Step4Review(props: {
                   );
                 };
 
+                // v2.28: convertimos los precios mensuales (nativos del producto)
+                // a la moneda del quote para que toda la UI de renovación se vea
+                // consistente con el total. Si falta TC y hay mezcla, devolvemos 0
+                // (el banner global ya avisa).
+                const toQuote = (n: number): number => {
+                  try {
+                    return convertAmount(n, productCurrency, currency, exchangeRate);
+                  } catch {
+                    return 0;
+                  }
+                };
                 return (
                   <div style={{ marginTop: 4 }}>
                     {recurringModules.map(({ sel, pm }) =>
                       renderBlock(
                         pm.name,
-                        Number(pm.recurring_monthly_price),
+                        toQuote(Number(pm.recurring_monthly_price)),
                         sel.recurring_billing_cycle,
                         sel.recurring_gift_months,
                         (c) => updateModuleRecurring(idx, pm.id, { recurring_billing_cycle: c, recurring_gift_months: c === 'annual' ? sel.recurring_gift_months : 0 }),
@@ -2049,7 +2183,7 @@ function Step4Review(props: {
                     )}
                     {itemFallback && renderBlock(
                       p.name,
-                      Number(p.recurring_monthly_price),
+                      toQuote(Number(p.recurring_monthly_price)),
                       it.recurring_billing_cycle,
                       it.recurring_gift_months,
                       (c) => updateItemRecurring(idx, { recurring_billing_cycle: c, recurring_gift_months: c === 'annual' ? it.recurring_gift_months : 0 }),
@@ -2147,15 +2281,15 @@ function Step4Review(props: {
             Resumen
           </h4>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13 }}>
-            <Row label="Subtotal" value={fmtMoney(subtotal)} />
+            <Row label="Subtotal" value={fmtMoney(subtotal, currency)} />
             {discount > 0 && (
               <Row
                 label={`Descuento (${discount}%)`}
-                value={'- ' + fmtMoney(discountAmt)}
+                value={'- ' + fmtMoney(discountAmt, currency)}
                 accent="var(--danger)"
               />
             )}
-            <Row label="IGV (18%)" value={fmtMoney(igv)} muted />
+            <Row label="IGV (18%)" value={fmtMoney(igv, currency)} muted />
             <div
               style={{
                 borderTop: '1px solid var(--ink-200)',
@@ -2163,7 +2297,7 @@ function Step4Review(props: {
                 marginTop: 6,
               }}
             >
-              <Row label="Total" value={fmtMoney(total)} bold large />
+              <Row label="Total" value={fmtMoney(total, currency)} bold large />
             </div>
           </div>
         </div>

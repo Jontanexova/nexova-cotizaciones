@@ -21,7 +21,6 @@ import {
   computeQuoteTotals,
   fmtDateNumeric,
   fmtMoney,
-  fmtUSD,
   formalRoleLabel,
   getRecurringCharges,
   getRecurringHeaderText,
@@ -95,10 +94,29 @@ export function generateQuotePdf(
   const pageHeight = pdf.internal.pageSize.getHeight(); // 842
   const margin = 42;
   const contentWidth = pageWidth - margin * 2;          // 511
-  const totals = computeQuoteTotals(quote.items || [], products, quote.discount);
-  const tc = orgSettings?.exchange_rate ? Number(orgSettings.exchange_rate) : null;
+  // v2.28: moneda del quote y TC. Usamos el snapshot guardado en el quote;
+  // si no existe (cotizaciones legadas) caemos a orgSettings.exchange_rate.
+  const quoteCurrency = quote.currency || 'PEN';
+  const tc =
+    (quote.exchange_rate ? Number(quote.exchange_rate) : null) ??
+    (orgSettings?.exchange_rate ? Number(orgSettings.exchange_rate) : null);
   const hasTc = !!(tc && tc > 0);
-  const recurring = getRecurringCharges(quote.items || [], products);
+  const otherCurrency = quoteCurrency === 'PEN' ? 'USD' : 'PEN';
+  const quoteSymbol = quoteCurrency === 'USD' ? '$' : 'S/';
+
+  const totals = computeQuoteTotals(
+    quote.items || [],
+    products,
+    quote.discount,
+    quoteCurrency,
+    tc,
+  );
+  const recurring = getRecurringCharges(quote.items || [], products, quoteCurrency, tc);
+
+  /** Convierte un monto en moneda del quote a la otra moneda (para columna USD/PEN secundaria). */
+  const toOther = (n: number): number =>
+    hasTc ? (quoteCurrency === 'PEN' ? n / tc! : n * tc!) : 0;
+  const fmtOther = (n: number) => fmtMoney(toOther(n), otherCurrency);
 
   // Reserva 36pt al final para el footer.
   const footerReserve = 36;
@@ -384,7 +402,16 @@ export function generateQuotePdf(
       }
     }
 
-    const unitPrice = basePerUnit + recurringAdd;
+    // v2.28: los montos hasta aquí están en la moneda nativa del producto.
+    // Convertimos a la moneda del quote para mostrar el unit/total consistente
+    // con los totales finales.
+    const productCurrency = p.currency || 'PEN';
+    const toQuote = (n: number): number => {
+      if (productCurrency === quoteCurrency) return n;
+      if (!hasTc) return 0;
+      return productCurrency === 'PEN' ? n / tc! : n * tc!;
+    };
+    const unitPrice = toQuote(basePerUnit + recurringAdd);
     const lineTotal = unitPrice * it.qty;
 
     const descLines = p.description
@@ -416,15 +443,15 @@ export function generateQuotePdf(
     pdf.setFont('helvetica', 'normal');
     pdf.setFontSize(10);
     pdf.text(String(it.qty), colCantR, y, { align: 'right' });
-    pdf.text(fmtMoney(unitPrice), colUnitR, y, { align: 'right' });
+    pdf.text(fmtMoney(unitPrice, quoteCurrency), colUnitR, y, { align: 'right' });
 
     pdf.setFont('helvetica', 'bold');
-    pdf.text(fmtMoney(lineTotal), colTotalR, y, { align: 'right' });
+    pdf.text(fmtMoney(lineTotal, quoteCurrency), colTotalR, y, { align: 'right' });
     if (hasTc) {
       pdf.setFont('helvetica', 'normal');
       pdf.setFontSize(8.5);
       setText(pdf, COLOR.ink400);
-      pdf.text(fmtUSD(lineTotal, tc!), colTotalR, y + 11, { align: 'right' });
+      pdf.text(fmtOther(lineTotal), colTotalR, y + 11, { align: 'right' });
     }
     y += 14;
 
@@ -448,7 +475,7 @@ export function generateQuotePdf(
         pdf.text(m.name, colDescX + 12, y);
         const nameWidth = pdf.getTextWidth(m.name);
         setText(pdf, COLOR.ink400);
-        pdf.text(`+${fmtMoney(m.price)}`, colDescX + 12 + nameWidth + 6, y);
+        pdf.text(`+${fmtMoney(m.price, productCurrency)}`, colDescX + 12 + nameWidth + 6, y);
         y += 11;
       }
     }
@@ -465,7 +492,7 @@ export function generateQuotePdf(
         pdf.text(rl.label, colDescX + 12, y);
         const lblWidth = pdf.getTextWidth(rl.label);
         setText(pdf, COLOR.ink400);
-        pdf.text(`+${fmtMoney(rl.amount)}`, colDescX + 12 + lblWidth + 6, y);
+        pdf.text(`+${fmtMoney(rl.amount, productCurrency)}`, colDescX + 12 + lblWidth + 6, y);
         y += 11;
       }
     }
@@ -486,10 +513,16 @@ export function generateQuotePdf(
   const labelColX = solesColX - 140;
 
   if (hasTc) {
-    drawSpacedLabel(pdf, 'S/', solesColX, y, COLOR.ink400, 7, 'right');
-    drawSpacedLabel(pdf, 'USD', usdColX, y, COLOR.ink400, 7, 'right');
+    drawSpacedLabel(pdf, quoteSymbol, solesColX, y, COLOR.ink400, 7, 'right');
+    drawSpacedLabel(pdf, otherCurrency, usdColX, y, COLOR.ink400, 7, 'right');
     y += 12;
   }
+
+  // v2.28: helpers para quitar el símbolo de la moneda del quote y de la otra.
+  const stripQuoteSymbol = (s: string) =>
+    s.replace(quoteCurrency === 'USD' ? /^\$\s*/ : /^S\/\s*/, '');
+  const stripOtherSymbol = (s: string) =>
+    s.replace(otherCurrency === 'USD' ? /^\$\s*/ : /^S\/\s*/, '');
 
   const totalsRow = (
     label: string,
@@ -503,11 +536,11 @@ export function generateQuotePdf(
     setText(pdf, labelColor);
     pdf.text(label, labelColX, y);
     setText(pdf, valueColor);
-    const solesNum = fmtMoney(sValue).replace('S/ ', '');
-    pdf.text(`${prefix}${solesNum}`, solesColX, y, { align: 'right' });
+    const mainNum = stripQuoteSymbol(fmtMoney(sValue, quoteCurrency));
+    pdf.text(`${prefix}${mainNum}`, solesColX, y, { align: 'right' });
     if (hasTc) {
-      const usdNum = fmtUSD(sValue, tc!).replace('$ ', '');
-      pdf.text(`${prefix}${usdNum}`, usdColX, y, { align: 'right' });
+      const altNum = stripOtherSymbol(fmtOther(sValue));
+      pdf.text(`${prefix}${altNum}`, usdColX, y, { align: 'right' });
     }
     y += 15;
   };
@@ -537,9 +570,9 @@ export function generateQuotePdf(
   setText(pdf, COLOR.ink900);
   pdf.text('TOTAL', labelColX, y);
   pdf.setFontSize(13.5);
-  pdf.text(fmtMoney(totals.total), solesColX, y, { align: 'right' });
+  pdf.text(fmtMoney(totals.total, quoteCurrency), solesColX, y, { align: 'right' });
   if (hasTc) {
-    pdf.text(fmtUSD(totals.total, tc!), usdColX, y, { align: 'right' });
+    pdf.text(fmtOther(totals.total), usdColX, y, { align: 'right' });
   }
   y += 20;
 
@@ -551,7 +584,7 @@ export function generateQuotePdf(
   pdf.text('Son:', margin, y);
   pdf.setFont('helvetica', 'bold');
   setText(pdf, COLOR.ink900);
-  const sonText = moneyToSonText(totals.total);
+  const sonText = moneyToSonText(totals.total, quoteCurrency);
   const sonLines = pdf.splitTextToSize(sonText, contentWidth - 32);
   pdf.text(sonLines, margin + 32, y);
   y += sonLines.length * 12 + 12;
@@ -603,7 +636,7 @@ export function generateQuotePdf(
       const nameLabel = r.qty > 1 ? `${r.label}  × ${r.qty}` : r.label;
       pdf.text(nameLabel, margin + recPad, ry);
       pdf.text(
-        `${fmtMoney(r.renewal_amount)} / ${period}`,
+        `${fmtMoney(r.renewal_amount, quoteCurrency)} / ${period}`,
         pageWidth - margin - recPad,
         ry,
         { align: 'right' },
@@ -616,7 +649,7 @@ export function generateQuotePdf(
       pdf.text(`${r.product_name} · ${getRecurringRowSubtext(r)}`, margin + recPad, ry);
       if (hasTc) {
         pdf.text(
-          `${fmtUSD(r.renewal_amount, tc!)} / ${period}`,
+          `${fmtOther(r.renewal_amount)} / ${period}`,
           pageWidth - margin - recPad,
           ry,
           { align: 'right' },
@@ -630,7 +663,11 @@ export function generateQuotePdf(
   // ─── 10) 5 CHIPS DE CONDICIONES ──────────────────────────────────────
   ensureSpace(62);
   const chipsList: { label: string; v1: string; v2?: string }[] = [
-    { label: 'Moneda',           v1: 'PEN', v2: 'Soles Peruanos' },
+    {
+      label: 'Moneda',
+      v1: quoteCurrency,
+      v2: quoteCurrency === 'USD' ? 'Dólares Americanos' : 'Soles Peruanos',
+    },
     { label: 'Forma de pago',    v1: quote.payment_terms || '—' },
     { label: 'Validez',          v1: `${quote.valid_days} días`, v2: 'Desde emisión' },
     { label: 'Entrega',          v1: `${quote.delivery_weeks} semanas`, v2: 'Hasta entrega final' },

@@ -20,7 +20,6 @@ import {
   computeQuoteTotals,
   fmtDateNumeric,
   fmtMoney,
-  fmtUSD,
   getRecurringCharges,
   getRecurringHeaderText,
   getRecurringRowSubtext,
@@ -71,10 +70,47 @@ export function QuoteDocument({
   orgSettings,
   onEditTerms,
 }: QuoteDocumentProps) {
-  const totals = computeQuoteTotals(quote.items || [], products, quote.discount);
-  const recurring = getRecurringCharges(quote.items || [], products);
-  const tc = orgSettings?.exchange_rate ? Number(orgSettings.exchange_rate) : null;
+  // v2.28: la moneda y el TC ahora se leen del snapshot del quote.
+  // exchange_rate del quote es el TC vigente al momento de crear/editar.
+  const quoteCurrency = quote.currency || 'PEN';
+  const tc =
+    (quote.exchange_rate ? Number(quote.exchange_rate) : null) ??
+    (orgSettings?.exchange_rate ? Number(orgSettings.exchange_rate) : null);
   const hasTc = !!(tc && tc > 0);
+  const otherCurrency = quoteCurrency === 'PEN' ? 'USD' : 'PEN';
+
+  const totals = computeQuoteTotals(
+    quote.items || [],
+    products,
+    quote.discount,
+    quoteCurrency,
+    tc,
+  );
+  const recurring = getRecurringCharges(
+    quote.items || [],
+    products,
+    quoteCurrency,
+    tc,
+  );
+
+  /**
+   * Convierte un monto que está en la moneda del quote a la "otra" moneda
+   * (para la columna secundaria del cuadro de totales).
+   */
+  const toOther = (amountInQuote: number): number => {
+    if (!hasTc) return 0;
+    return quoteCurrency === 'PEN' ? amountInQuote / tc! : amountInQuote * tc!;
+  };
+  const fmtOther = (amountInQuote: number) =>
+    fmtMoney(toOther(amountInQuote), otherCurrency);
+  const fmtOtherNoSym = (amountInQuote: number) => {
+    const formatted = fmtOther(amountInQuote);
+    return formatted.replace(/^[\$S][\/ ]?\s*/, '').trim();
+  };
+  const quoteSymbol = quoteCurrency === 'USD' ? '$' : 'S/';
+  // Para "limpiar" prefijo en la columna principal (igual lógica que antes con S/).
+  const stripQuoteSymbol = (s: string) =>
+    s.replace(quoteCurrency === 'USD' ? /^\$\s*/ : /^S\/\s*/, '');
 
   const justText =
     (quote.justification_text && quote.justification_text.trim()) ||
@@ -385,8 +421,22 @@ export function QuoteDocument({
                 }
               }
 
-              const unitPrice = basePerUnit + recurringAdd;
+              // v2.28: basePerUnit y recurringAdd están en la moneda nativa del
+              // producto. Convertimos a la moneda del quote para mostrar montos
+              // consistentes con los totales. Si falla el TC, mostramos 0
+              // (el caller del PDF ya valida que haya TC cuando hay mezcla).
+              const productCurrency = p.currency || 'PEN';
+              const toQuote = (n: number): number => {
+                if (productCurrency === quoteCurrency) return n;
+                if (!hasTc) return 0;
+                return productCurrency === 'PEN' ? n / tc! : n * tc!;
+              };
+              const unitPrice = toQuote(basePerUnit + recurringAdd);
               const lineTotal = unitPrice * it.qty;
+              // Para los módulos y recurring lines mostramos su monto nativo
+              // (en moneda del producto) — quedan los del PDF v2.27 sin cambio
+              // visible si toda la cotización está en una sola moneda.
+              const modulePriceCurrency = productCurrency;
 
               const modules = (it.modules || [])
                 .map((sm) => p.modules?.find((x) => x.id === sm.module_id))
@@ -408,7 +458,7 @@ export function QuoteDocument({
                       <ul style={{ margin: '8px 0 0 0', padding: '0 0 0 16px', fontSize: 11.5, color: 'var(--ink-700)' }}>
                         {modules.map((m) => (
                           <li key={m.id} style={{ marginBottom: 2 }}>
-                            {m.name} <span style={{ color: 'var(--ink-400)' }}>+{fmtMoney(m.price)}</span>
+                            {m.name} <span style={{ color: 'var(--ink-400)' }}>+{fmtMoney(m.price, modulePriceCurrency)}</span>
                           </li>
                         ))}
                       </ul>
@@ -419,7 +469,7 @@ export function QuoteDocument({
                           .filter((r) => r.amount > 0)
                           .map((rl, i) => (
                             <li key={i} style={{ marginBottom: 2 }}>
-                              {rl.label} <span style={{ color: 'var(--ink-400)' }}>+{fmtMoney(rl.amount)}</span>
+                              {rl.label} <span style={{ color: 'var(--ink-400)' }}>+{fmtMoney(rl.amount, modulePriceCurrency)}</span>
                             </li>
                           ))}
                       </ul>
@@ -429,13 +479,13 @@ export function QuoteDocument({
                     {it.qty}
                   </td>
                   <td style={{ padding: '12px 4px', textAlign: 'right', verticalAlign: 'top', fontVariantNumeric: 'tabular-nums' }}>
-                    {fmtMoney(unitPrice)}
+                    {fmtMoney(unitPrice, quoteCurrency)}
                   </td>
                   <td style={{ padding: '12px 4px', textAlign: 'right', verticalAlign: 'top' }}>
-                    <div style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(lineTotal)}</div>
+                    <div style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(lineTotal, quoteCurrency)}</div>
                     {hasTc && (
                       <div style={{ fontSize: 11, color: 'var(--ink-400)', fontVariantNumeric: 'tabular-nums', marginTop: 2 }}>
-                        {fmtUSD(lineTotal, tc!)}
+                        {fmtOther(lineTotal)}
                       </div>
                     )}
                   </td>
@@ -453,8 +503,8 @@ export function QuoteDocument({
             <thead>
               <tr>
                 <td />
-                <td style={{ textAlign: 'right', fontSize: 10, letterSpacing: '.16em', color: 'var(--ink-400)', fontWeight: 600, paddingBottom: 4, paddingRight: 16 }}>S/</td>
-                <td style={{ textAlign: 'right', fontSize: 10, letterSpacing: '.16em', color: 'var(--ink-400)', fontWeight: 600, paddingBottom: 4, minWidth: 96 }}>USD</td>
+                <td style={{ textAlign: 'right', fontSize: 10, letterSpacing: '.16em', color: 'var(--ink-400)', fontWeight: 600, paddingBottom: 4, paddingRight: 16 }}>{quoteSymbol}</td>
+                <td style={{ textAlign: 'right', fontSize: 10, letterSpacing: '.16em', color: 'var(--ink-400)', fontWeight: 600, paddingBottom: 4, minWidth: 96 }}>{otherCurrency}</td>
               </tr>
             </thead>
           )}
@@ -462,11 +512,11 @@ export function QuoteDocument({
             <tr>
               <td style={{ paddingRight: 36, color: 'var(--ink-700)' }}>Subtotal</td>
               <td style={{ textAlign: 'right', paddingRight: 16, minWidth: 96 }}>
-                {fmtMoney(totals.subtotal).replace('S/ ', '')}
+                {stripQuoteSymbol(fmtMoney(totals.subtotal, quoteCurrency))}
               </td>
               {hasTc && (
                 <td style={{ textAlign: 'right', color: 'var(--ink-500)' }}>
-                  {fmtUSD(totals.subtotal, tc!).replace('$ ', '')}
+                  {fmtOtherNoSym(totals.subtotal)}
                 </td>
               )}
             </tr>
@@ -474,11 +524,11 @@ export function QuoteDocument({
               <tr>
                 <td style={{ paddingRight: 36, color: 'var(--teal-700)' }}>Descuento ({quote.discount}%)</td>
                 <td style={{ textAlign: 'right', paddingRight: 16, color: 'var(--teal-700)' }}>
-                  − {fmtMoney(totals.discountAmt).replace('S/ ', '')}
+                  − {stripQuoteSymbol(fmtMoney(totals.discountAmt, quoteCurrency))}
                 </td>
                 {hasTc && (
                   <td style={{ textAlign: 'right', color: 'var(--teal-700)' }}>
-                    − {fmtUSD(totals.discountAmt, tc!).replace('$ ', '')}
+                    − {fmtOtherNoSym(totals.discountAmt)}
                   </td>
                 )}
               </tr>
@@ -486,22 +536,22 @@ export function QuoteDocument({
             <tr>
               <td style={{ paddingRight: 36, color: 'var(--ink-700)' }}>IGV (18%)</td>
               <td style={{ textAlign: 'right', paddingRight: 16 }}>
-                {fmtMoney(totals.igv).replace('S/ ', '')}
+                {stripQuoteSymbol(fmtMoney(totals.igv, quoteCurrency))}
               </td>
               {hasTc && (
                 <td style={{ textAlign: 'right', color: 'var(--ink-500)' }}>
-                  {fmtUSD(totals.igv, tc!).replace('$ ', '')}
+                  {fmtOtherNoSym(totals.igv)}
                 </td>
               )}
             </tr>
             <tr style={{ borderTop: '1px solid var(--ink-900)' }}>
               <td style={{ paddingTop: 10, paddingRight: 36, fontWeight: 700, fontSize: 14, color: 'var(--ink-900)' }}>TOTAL</td>
               <td style={{ textAlign: 'right', paddingTop: 10, paddingRight: 16, fontWeight: 700, fontSize: 15, color: 'var(--ink-900)' }}>
-                {fmtMoney(totals.total)}
+                {fmtMoney(totals.total, quoteCurrency)}
               </td>
               {hasTc && (
                 <td style={{ textAlign: 'right', paddingTop: 10, fontWeight: 700, fontSize: 15, color: 'var(--ink-900)' }}>
-                  {fmtUSD(totals.total, tc!)}
+                  {fmtOther(totals.total)}
                 </td>
               )}
             </tr>
@@ -512,7 +562,7 @@ export function QuoteDocument({
       {/* ▸ "Son: …" */}
       <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--ink-700)' }}>
         <span style={{ color: 'var(--ink-500)' }}>Son: </span>
-        <span style={{ fontWeight: 700 }}>{moneyToSonText(totals.total)}</span>
+        <span style={{ fontWeight: 700 }}>{moneyToSonText(totals.total, quoteCurrency)}</span>
       </div>
 
       {/* ▸ PAGOS RECURRENTES */}
@@ -559,11 +609,11 @@ export function QuoteDocument({
                 </div>
                 <div style={{ textAlign: 'right' }}>
                   <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--ink-900)' }}>
-                    {fmtMoney(r.renewal_amount)} / {period}
+                    {fmtMoney(r.renewal_amount, quoteCurrency)} / {period}
                   </div>
                   {hasTc && (
                     <div style={{ fontSize: 12, color: 'var(--ink-500)', marginTop: 2 }}>
-                      {fmtUSD(r.renewal_amount, tc!)} / {period}
+                      {fmtOther(r.renewal_amount)} / {period}
                     </div>
                   )}
                 </div>
@@ -582,7 +632,11 @@ export function QuoteDocument({
           gap: 14,
         }}
       >
-        <ConditionChip label="Moneda" v1="PEN" v2="Soles Peruanos" />
+        <ConditionChip
+          label="Moneda"
+          v1={quoteCurrency}
+          v2={quoteCurrency === 'USD' ? 'Dólares Americanos' : 'Soles Peruanos'}
+        />
         <ConditionChip label="Forma de pago" v1={quote.payment_terms || '—'} />
         <ConditionChip label="Validez" v1={`${quote.valid_days} días`} v2="Desde emisión" />
         <ConditionChip label="Entrega" v1={`${quote.delivery_weeks} semanas`} v2="Hasta entrega final" />

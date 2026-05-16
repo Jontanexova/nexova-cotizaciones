@@ -1,20 +1,29 @@
-import type { Product, ProductModule, QuoteItem, QuoteItemModule, QuoteStatus, RecurringCycle } from './types';
+import type { Currency, Product, ProductModule, QuoteItem, QuoteItemModule, QuoteStatus, RecurringCycle } from './types';
 
 // ─── Formatters ───
-export const fmtMoney = (n: number | null | undefined): string => {
+/**
+ * Formatea un monto en la moneda indicada. Si no se pasa moneda, asume PEN
+ * (compatibilidad con código pre-v2.28 que llamaba `fmtMoney(n)` sin args).
+ */
+export const fmtMoney = (
+  n: number | null | undefined,
+  currency: Currency = 'PEN',
+): string => {
   const v = Number(n ?? 0);
-  return (
-    'S/ ' +
-    (Math.round(v * 100) / 100).toLocaleString('es-PE', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })
+  const formatted = (Math.round(v * 100) / 100).toLocaleString(
+    currency === 'USD' ? 'en-US' : 'es-PE',
+    { minimumFractionDigits: 2, maximumFractionDigits: 2 },
   );
+  return (currency === 'USD' ? '$ ' : 'S/ ') + formatted;
 };
 
 /**
  * Convierte un monto en soles a USD usando el tipo de cambio y formatea.
  * Si no hay TC, devuelve string vacío (el caller decide si mostrarlo).
+ *
+ * @deprecated v2.28: usar `convertAmount` + `fmtMoney` para conversiones
+ * arbitrarias entre monedas. Se mantiene porque el PDF y la lista de quotes
+ * lo usan para mostrar el equivalente informativo del total en USD.
  */
 export const fmtUSD = (pen: number | null | undefined, rate: number | null | undefined): string => {
   if (!rate || rate <= 0) return '';
@@ -26,6 +35,47 @@ export const fmtUSD = (pen: number | null | undefined, rate: number | null | und
       maximumFractionDigits: 2,
     })
   );
+};
+
+/**
+ * v2.28: convierte un monto entre PEN y USD usando un tipo de cambio.
+ *
+ * Convenio: `rate` es PEN por USD (ej. 3.75 ⇒ 1 USD = 3.75 PEN). Misma
+ * convención que usa el resto del sistema (organization_settings.exchange_rate,
+ * fmtUSD legacy, etc).
+ *
+ * Si `from === to` devuelve el mismo monto. Si falta `rate` o es inválido y se
+ * requiere conversión, lanza error — el caller debe validar TC antes de llegar
+ * acá (ej. Wizard no permite avanzar con mezcla de monedas sin TC).
+ */
+export const convertAmount = (
+  amount: number,
+  from: Currency,
+  to: Currency,
+  rate: number | null | undefined,
+): number => {
+  if (from === to) return amount;
+  if (!rate || rate <= 0) {
+    throw new Error(
+      'Falta tipo de cambio para convertir entre soles y dólares. Configúralo en Ajustes.',
+    );
+  }
+  // PEN → USD: dividir; USD → PEN: multiplicar.
+  return from === 'PEN' ? amount / rate : amount * rate;
+};
+
+/**
+ * v2.28: convierte el precio nativo de un producto a la moneda objetivo de la
+ * cotización. Wrapper de `convertAmount` que toma el producto entero para no
+ * repetir la lookup de currency en todos los callers.
+ */
+export const convertProductPrice = (
+  amount: number,
+  product: { currency?: Currency },
+  quoteCurrency: Currency,
+  rate: number | null | undefined,
+): number => {
+  return convertAmount(amount, product.currency || 'PEN', quoteCurrency, rate);
 };
 
 export const fmtDate = (iso: string | null | undefined): string => {
@@ -121,6 +171,8 @@ export const WARN_GIFT_MONTHS_THRESHOLD = 3;
 export function getRecurringCharges(
   items: QuoteItem[],
   products: Product[],
+  quoteCurrency: Currency = 'PEN',
+  exchangeRate: number | null | undefined = null,
 ): RecurringCharge[] {
   const rows: RecurringCharge[] = [];
 
@@ -129,6 +181,11 @@ export function getRecurringCharges(
     if (!p || !p.requires_recurring) continue;
 
     const qty = it.qty || 1;
+    // v2.28: los módulos heredan la moneda del producto. Convertimos cada
+    // precio mensual a la moneda del quote antes de calcular periodo/renewal.
+    const productCurrency = p.currency || 'PEN';
+    const toQuote = (n: number) =>
+      convertAmount(n, productCurrency, quoteCurrency, exchangeRate);
 
     const modulesWithRecurring = (it.modules || [])
       .map((selMod) => {
@@ -142,7 +199,7 @@ export function getRecurringCharges(
       for (const { pm, sel } of modulesWithRecurring) {
         const cycle: 'monthly' | 'annual' = sel.recurring_billing_cycle || 'monthly';
         const gift = cycle === 'annual' ? Math.max(0, Math.min(MAX_GIFT_MONTHS, sel.recurring_gift_months || 0)) : 0;
-        const monthlyUnit = Number(pm.recurring_monthly_price);
+        const monthlyUnit = toQuote(Number(pm.recurring_monthly_price));
         const firstPeriod = cycle === 'annual' ? monthlyUnit * 12 : monthlyUnit;
         const renewal = cycle === 'annual' ? monthlyUnit * (12 - gift) : monthlyUnit;
         rows.push({
@@ -158,8 +215,9 @@ export function getRecurringCharges(
         });
       }
     } else {
-      const monthlyUnit = Number(p.recurring_monthly_price || 0);
-      if (monthlyUnit <= 0) continue;
+      const monthlyUnitNative = Number(p.recurring_monthly_price || 0);
+      if (monthlyUnitNative <= 0) continue;
+      const monthlyUnit = toQuote(monthlyUnitNative);
       const cycle: 'monthly' | 'annual' = it.recurring_billing_cycle || 'monthly';
       const gift = cycle === 'annual' ? Math.max(0, Math.min(MAX_GIFT_MONTHS, it.recurring_gift_months || 0)) : 0;
       const firstPeriod = cycle === 'annual' ? monthlyUnit * 12 : monthlyUnit;
@@ -210,31 +268,66 @@ export function getRecurringRowSubtext(charge: RecurringCharge): string {
 export function computeQuoteTotals(
   items: QuoteItem[],
   products: Product[],
-  discount: number
+  discount: number,
+  quoteCurrency: Currency = 'PEN',
+  exchangeRate: number | null | undefined = null,
 ): QuoteTotals {
   let subtotal = 0;
   for (const it of items) {
     const p = products.find((x) => x.id === it.product_id);
     if (!p) continue;
-    let line = Number(p.base_price || 0);
+    let lineNative = Number(p.base_price || 0);
     for (const selMod of it.modules || []) {
       const m = p.modules?.find((x) => x.id === selMod.module_id);
-      if (m) line += Number(m.price || 0);
+      if (m) lineNative += Number(m.price || 0);
     }
+    const line = convertAmount(lineNative, p.currency || 'PEN', quoteCurrency, exchangeRate);
     subtotal += line * (it.qty || 1);
   }
 
   // v2.18: primer período de cada cargo recurrente se SUMA al subtotal.
-  const recurring = getRecurringCharges(items, products);
+  // v2.28: getRecurringCharges ya devuelve montos en la moneda del quote.
+  const recurring = getRecurringCharges(items, products, quoteCurrency, exchangeRate);
   for (const r of recurring) {
     subtotal += r.first_period_amount;
   }
 
   const discountAmt = subtotal * ((discount || 0) / 100);
   const afterDisc = subtotal - discountAmt;
+  // IGV 18% se aplica igual en PEN y USD (decisión de negocio v2.28).
   const igv = afterDisc * 0.18;
   const total = afterDisc + igv;
   return { subtotal, discountAmt, afterDisc, igv, total };
+}
+
+/**
+ * v2.28: total de una cotización expresado en SOLES, listo para sumar a un
+ * agregado del Dashboard o de un reporte que mezcle cotizaciones en distintas
+ * monedas. Si la cotización es USD y no tiene `exchange_rate`, retorna 0
+ * (no se puede sumar peras y manzanas; el caller decide si filtra).
+ */
+export function computeQuoteTotalInPEN(
+  quote: {
+    items?: QuoteItem[];
+    discount: number;
+    currency?: Currency;
+    exchange_rate?: number | null;
+  },
+  products: Product[],
+): number {
+  const qCurrency = quote.currency || 'PEN';
+  const rate = quote.exchange_rate ?? null;
+  // Calculamos los totales en la moneda nativa del quote.
+  const totals = computeQuoteTotals(
+    quote.items || [],
+    products,
+    quote.discount,
+    qCurrency,
+    rate,
+  );
+  if (qCurrency === 'PEN') return totals.total;
+  if (!rate || rate <= 0) return 0;
+  return totals.total * rate;
 }
 
 // ─── Line price (single item) ───
@@ -250,16 +343,19 @@ export function lineItemPrice(
     recurring_billing_cycle?: RecurringCycle | null;
     recurring_gift_months?: number;
   },
-  products: Product[]
+  products: Product[],
+  quoteCurrency: Currency = 'PEN',
+  exchangeRate: number | null | undefined = null,
 ): number {
   const p = products.find((x) => x.id === item.product_id);
   if (!p) return 0;
 
-  let line = Number(p.base_price || 0);
+  let lineNative = Number(p.base_price || 0);
   for (const selMod of item.modules || []) {
     const m = p.modules?.find((x) => x.id === selMod.module_id);
-    if (m) line += Number(m.price || 0);
+    if (m) lineNative += Number(m.price || 0);
   }
+  const line = convertAmount(lineNative, p.currency || 'PEN', quoteCurrency, exchangeRate);
   let total = line * (item.qty || 1);
 
   if (p.requires_recurring) {
@@ -272,6 +368,8 @@ export function lineItemPrice(
         recurring_gift_months: item.recurring_gift_months || 0,
       }],
       products,
+      quoteCurrency,
+      exchangeRate,
     );
     for (const c of charges) total += c.first_period_amount;
   }
@@ -359,17 +457,19 @@ export function integerToSpanishWords(n: number): string {
 }
 
 /**
- * Genera la línea "Son: {monto en palabras} CON {cc}/100 SOLES" que va bajo
- * el bloque de totales en el PDF formal. Redondea a 2 decimales antes de partir
- * entero/centavos para evitar artefactos de float (ej. 1513.349999 → 1513.35).
+ * Genera la línea "Son: {monto en palabras} CON {cc}/100 SOLES" (o DÓLARES
+ * AMERICANOS) que va bajo el bloque de totales en el PDF formal. Redondea
+ * a 2 decimales antes de partir entero/centavos para evitar artefactos de
+ * float (ej. 1513.349999 → 1513.35).
  */
-export function moneyToSonText(amount: number): string {
+export function moneyToSonText(amount: number, currency: Currency = 'PEN'): string {
   const rounded = Math.round(amount * 100) / 100;
   const integer = Math.floor(rounded);
   const cents = Math.round((rounded - integer) * 100);
   const words = integerToSpanishWords(integer);
   const ccStr = String(cents).padStart(2, '0');
-  return `${words} CON ${ccStr}/100 SOLES`;
+  const unit = currency === 'USD' ? 'DÓLARES AMERICANOS' : 'SOLES';
+  return `${words} CON ${ccStr}/100 ${unit}`;
 }
 
 // ─── Timeout wrapper ───

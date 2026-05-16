@@ -51,6 +51,13 @@ export type QuoteStatus =
   | 'negociacion'
   | 'aceptada'
   | 'rechazada';
+
+/**
+ * v2.28: moneda de un producto o de una cotización. Los módulos heredan la
+ * moneda de su producto padre (no se guarda por separado).
+ */
+export type Currency = 'PEN' | 'USD';
+
 export type ProductCategory =
   | 'Producto propio'
   | 'Servicio'
@@ -116,6 +123,8 @@ export interface Product {
   requires_recurring: boolean;
   /** v2.18: precio mensual fallback — se usa solo si requires_recurring=true Y ningún módulo seleccionado tiene recurring_monthly_price>0. */
   recurring_monthly_price: number;
+  /** v2.28: moneda nativa del producto. Los módulos heredan esta moneda. */
+  currency: Currency;
   active: boolean;
   created_at: string;
   updated_at: string;
@@ -195,6 +204,8 @@ export interface Quote {
   modality_summary: string | null;
   /** v2.25: override de "Notas y condiciones" (una línea por nota). NULL = usa organization_settings.default_terms. */
   terms: string | null;
+  /** v2.28: moneda en la que se emite la cotización. Items en otra moneda se convierten usando exchange_rate. */
+  currency: Currency;
   exchange_rate: number | null;
   views: number;
   public_token: string | null;

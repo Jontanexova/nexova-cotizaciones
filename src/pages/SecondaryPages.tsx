@@ -5,7 +5,14 @@ import { useVendors } from '../hooks/useVendors';
 import { useQuotes } from '../hooks/useQuotes';
 import { useProducts } from '../hooks/useProducts';
 import { useAuth } from '../contexts/AuthContext';
-import { computeQuoteTotals, fmtDate, fmtMoney, fmtUSD, roleLabel } from '../lib/utils';
+import {
+  computeQuoteTotalInPEN,
+  computeQuoteTotals,
+  fmtDate,
+  fmtMoney,
+  fmtUSD,
+  roleLabel,
+} from '../lib/utils';
 import { fetchOrgSettings, updateOrgSettings, updateExchangeRate, updatePeruApiConfig, refreshExchangeRateFromApi, fetchSmtpSettings, updateSmtpSettings, sendEmail, fetchAllowedDomains, addAllowedDomain, removeAllowedDomain, normalizeDomain, fetchCleanupCounts, cleanupQuotes, cleanupClients, cleanupProducts, cleanupAllTransactional, fetchBranding, updateBranding, resetBrandingToDefaults, uploadBrandingAsset, removeBrandingAsset, type CleanupCounts, type CleanupResult } from '../lib/db';
 import { useBranding } from '../contexts/BrandingContext';
 import type { AllowedDomain, BrandingSettings, OrganizationSettings, Product, Quote, SmtpSettings } from '../lib/types';
@@ -51,7 +58,7 @@ export function Vendors() {
               const vQuotes = quotes.filter((q) => q.vendor_id === v.id);
               const closed = vQuotes.filter((q) => q.status === 'aceptada');
               const revenue = closed.reduce(
-                (s, q) => s + computeQuoteTotals(q.items || [], products, q.discount).total,
+                (s, q) => s + computeQuoteTotalInPEN(q, products),
                 0
               );
               return (
@@ -348,10 +355,12 @@ export function Reports() {
   );
 
   // Métricas principales (período actual)
+  // v2.28: agregamos en SOLES — computeQuoteTotalInPEN convierte cotizaciones
+  // USD usando su exchange_rate snap. Cotizaciones USD sin TC valen 0.
   const revenue = useMemo(
     () =>
       acceptedInPeriod.reduce(
-        (s, q) => s + computeQuoteTotals(q.items || [], products, q.discount).total,
+        (s, q) => s + computeQuoteTotalInPEN(q, products),
         0,
       ),
     [acceptedInPeriod, products],
@@ -363,7 +372,7 @@ export function Reports() {
   const prevRevenue = useMemo(
     () =>
       acceptedInPrev.reduce(
-        (s, q) => s + computeQuoteTotals(q.items || [], products, q.discount).total,
+        (s, q) => s + computeQuoteTotalInPEN(q, products),
         0,
       ),
     [acceptedInPrev, products],
@@ -376,17 +385,17 @@ export function Reports() {
     () =>
       quotes
         .filter((q) => ['enviada', 'vista', 'negociacion'].includes(q.status))
-        .reduce((s, q) => s + computeQuoteTotals(q.items || [], products, q.discount).total, 0),
+        .reduce((s, q) => s + computeQuoteTotalInPEN(q, products), 0),
     [quotes, products],
   );
 
-  // Top 5 clientes del período
+  // Top 5 clientes del período (totales en soles)
   const topClients = useMemo(() => {
     const map = new Map<string, { name: string; total: number; count: number }>();
     for (const q of acceptedInPeriod) {
       const key = q.client?.id || q.client_id;
       const name = q.client?.company || 'Sin nombre';
-      const total = computeQuoteTotals(q.items || [], products, q.discount).total;
+      const total = computeQuoteTotalInPEN(q, products);
       const cur = map.get(key) || { name, total: 0, count: 0 };
       cur.total += total;
       cur.count += 1;
@@ -428,7 +437,17 @@ export function Reports() {
         const amount = linePre * (it.qty || 1);
         // aplicar descuento proporcional y IGV para reflejar el monto final
         const afterDisc = amount * (1 - (q.discount || 0) / 100);
-        const withIgv = afterDisc * 1.18;
+        let withIgv = afterDisc * 1.18;
+        // v2.28: el monto está en la moneda nativa del producto.
+        // Convertimos a soles para agregar consistentemente.
+        const productCurrency = p.currency || 'PEN';
+        if (productCurrency === 'USD') {
+          if (q.exchange_rate && q.exchange_rate > 0) {
+            withIgv = withIgv * q.exchange_rate;
+          } else {
+            withIgv = 0;
+          }
+        }
         const cur = map.get(p.id) || { name: p.name, total: 0, qty: 0 };
         cur.total += withIgv;
         cur.qty += it.qty || 0;

@@ -3,6 +3,7 @@ import type {
   AllowedDomain,
   BrandingSettings,
   Client,
+  Currency,
   ExchangeRate,
   OrganizationSettings,
   Product,
@@ -111,6 +112,8 @@ export interface ProductInput {
   requires_recurring?: boolean;
   /** v2.18 — precio mensual fallback. */
   recurring_monthly_price?: number;
+  /** v2.28 — moneda nativa del producto (PEN o USD). */
+  currency?: Currency;
   active?: boolean;
 }
 
@@ -728,6 +731,8 @@ export interface CreateQuoteInput {
   modality_summary?: string;
   /** v2.25: override de términos (una línea por nota). NULL = usa default global. */
   terms?: string | null;
+  /** v2.28: moneda en la que se emite la cotización. Default 'PEN'. */
+  currency?: Currency;
 }
 
 export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
@@ -778,6 +783,7 @@ export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
       scope_summary: input.scope_summary || null,
       modality_summary: input.modality_summary || null,
       terms: input.terms ?? null,
+      currency: input.currency || 'PEN',
       exchange_rate: exchangeRate,
       views: 0,
     } as any)
@@ -874,6 +880,7 @@ export async function updateQuote(
       scope_summary: input.scope_summary || null,
       modality_summary: input.modality_summary || null,
       terms: input.terms ?? null,
+      currency: input.currency || 'PEN',
     } as any)
     .eq('id', quoteId);
   if (quoteErr) throw quoteErr;

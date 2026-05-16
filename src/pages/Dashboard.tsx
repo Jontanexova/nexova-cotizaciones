@@ -36,13 +36,31 @@ export function Dashboard({ onOpenQuote, onNewQuote }: DashboardProps) {
     });
   }, [quotes, filter, query]);
 
+  // v2.28: el Dashboard suma valores que pueden venir de cotizaciones en PEN
+  // o USD. Convertimos todo a soles usando el TC snapshot de cada quote.
+  // Si una cotización USD no tiene exchange_rate, no se puede sumar — se omite
+  // (es legacy o estado inconsistente; el contador 'total' la sigue contando).
   const metrics = useMemo(() => {
     let totalValue = 0;
     let won = 0;
     let active = 0;
     for (const q of quotes) {
-      const totals = computeQuoteTotals(q.items || [], products, q.discount);
-      totalValue += totals.total;
+      const qCurrency = q.currency || 'PEN';
+      const totals = computeQuoteTotals(
+        q.items || [],
+        products,
+        q.discount,
+        qCurrency,
+        q.exchange_rate,
+      );
+      // Convertir el total a soles para agregar.
+      let totalInPEN = totals.total;
+      if (qCurrency === 'USD') {
+        totalInPEN = q.exchange_rate && q.exchange_rate > 0
+          ? totals.total * q.exchange_rate
+          : 0; // sin TC no podemos sumar
+      }
+      totalValue += totalInPEN;
       if (q.status === 'aceptada') won++;
       if (['enviada', 'vista', 'negociacion'].includes(q.status)) active++;
     }
@@ -134,8 +152,8 @@ export function Dashboard({ onOpenQuote, onNewQuote }: DashboardProps) {
         >
           <Stat label="Cotizaciones" value={metrics.total} icon="file" />
           <Stat
-            label="Valor total"
-            value={fmtMoney(metrics.totalValue).replace('S/ ', 'S/')}
+            label="Valor total (S/)"
+            value={fmtMoney(metrics.totalValue, 'PEN').replace('S/ ', 'S/')}
             icon="dollar"
           />
           <Stat label="Tasa de cierre" value={metrics.winRate + '%'} icon="chart" />
@@ -226,7 +244,14 @@ export function Dashboard({ onOpenQuote, onNewQuote }: DashboardProps) {
               </thead>
               <tbody>
                 {visibleQuotes.map((q) => {
-                  const totals = computeQuoteTotals(q.items || [], products, q.discount);
+                  const qCurrency = q.currency || 'PEN';
+                  const totals = computeQuoteTotals(
+                    q.items || [],
+                    products,
+                    q.discount,
+                    qCurrency,
+                    q.exchange_rate,
+                  );
                   const v = q.vendor;
                   return (
                     <tr
@@ -279,7 +304,7 @@ export function Dashboard({ onOpenQuote, onNewQuote }: DashboardProps) {
                           fontWeight: 600,
                         }}
                       >
-                        {fmtMoney(totals.total)}
+                        {fmtMoney(totals.total, qCurrency)}
                       </td>
                       <td style={{ padding: '12px 12px', color: 'var(--ink-500)', fontSize: 12.5 }}>
                         {fmtDate(q.created_at)}

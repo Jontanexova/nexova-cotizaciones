@@ -29,7 +29,14 @@ export function buildClaudePrompt(quote: Quote, products: Product[]): string {
     })
     .join('\n');
 
-  const totals = computeQuoteTotals(quote.items || [], products, quote.discount);
+  const qCurrency = quote.currency || 'PEN';
+  const totals = computeQuoteTotals(
+    quote.items || [],
+    products,
+    quote.discount,
+    qCurrency,
+    quote.exchange_rate,
+  );
   const cliente = quote.client;
   const requirements =
     (quote.requirements || '').trim() ||
@@ -80,7 +87,7 @@ Debes aplicar **sin excepción** todas las siguientes prácticas:
 
 **Cotización asociada:** ${quote.code}
 **Plazo de entrega estimado:** ${quote.delivery_weeks} semanas
-**Inversión total:** ${fmtMoney(totals.total)} (${fmtMoney(totals.subtotal)} subtotal${quote.discount > 0 ? `, ${quote.discount}% descuento aplicado` : ''})
+**Inversión total:** ${fmtMoney(totals.total, qCurrency)} (${fmtMoney(totals.subtotal, qCurrency)} subtotal${quote.discount > 0 ? `, ${quote.discount}% descuento aplicado` : ''})
 
 ## Requerimientos del cliente (input literal)
 

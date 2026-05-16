@@ -209,7 +209,14 @@ export function Quotes({ onOpenQuote, onNewQuote, onEditQuote }: QuotesProps) {
             </thead>
             <tbody>
               {visibleQuotes.map((q) => {
-                const totals = computeQuoteTotals(q.items || [], products, q.discount);
+                const qCurrency = q.currency || 'PEN';
+                const totals = computeQuoteTotals(
+                  q.items || [],
+                  products,
+                  q.discount,
+                  qCurrency,
+                  q.exchange_rate,
+                );
                 const v = q.vendor;
                 return (
                   <tr
@@ -262,7 +269,7 @@ export function Quotes({ onOpenQuote, onNewQuote, onEditQuote }: QuotesProps) {
                         fontWeight: 600,
                       }}
                     >
-                      {fmtMoney(totals.total)}
+                      {fmtMoney(totals.total, qCurrency)}
                     </td>
                     <td style={{ padding: '14px 12px', color: 'var(--ink-500)', fontSize: 12.5 }}>
                       {fmtDate(q.created_at)}

@@ -14,7 +14,7 @@ import {
   type ProductInput,
   type ProductModuleInput,
 } from '../lib/db';
-import type { Product, ProductCategory, ProductModule } from '../lib/types';
+import type { Currency, Product, ProductCategory, ProductModule } from '../lib/types';
 
 const CATEGORIES: ProductCategory[] = [
   'Producto propio',
@@ -142,28 +142,50 @@ export function Products() {
                   </div>
                   <div style={{ textAlign: 'right' }}>
                     <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--teal-700)' }}>
-                      {fmtMoney(p.base_price)}
+                      {fmtMoney(p.base_price, p.currency)}
                     </div>
-                    {p.requires_recurring && (
+                    <div
+                      style={{
+                        display: 'flex',
+                        gap: 4,
+                        justifyContent: 'flex-end',
+                        marginTop: 3,
+                      }}
+                    >
                       <span
                         style={{
                           fontSize: 10,
                           padding: '2px 7px',
-                          background: 'var(--teal-50)',
-                          color: 'var(--teal-700)',
+                          background: p.currency === 'USD' ? '#eef2ff' : 'var(--ink-50)',
+                          color: p.currency === 'USD' ? '#4338ca' : 'var(--ink-600)',
                           borderRadius: 999,
                           fontWeight: 600,
                           letterSpacing: '.04em',
-                          marginTop: 3,
                           display: 'inline-block',
                         }}
                       >
-                        RECURRENTE
+                        {p.currency || 'PEN'}
                       </span>
-                    )}
+                      {p.requires_recurring && (
+                        <span
+                          style={{
+                            fontSize: 10,
+                            padding: '2px 7px',
+                            background: 'var(--teal-50)',
+                            color: 'var(--teal-700)',
+                            borderRadius: 999,
+                            fontWeight: 600,
+                            letterSpacing: '.04em',
+                            display: 'inline-block',
+                          }}
+                        >
+                          RECURRENTE
+                        </span>
+                      )}
+                    </div>
                     {!p.requires_recurring && p.recurring_price != null && p.recurring_price > 0 && (
                       <div style={{ fontSize: 11, color: 'var(--ink-500)' }}>
-                        + {fmtMoney(p.recurring_price)} {p.recurring_unit || '/mes'}
+                        + {fmtMoney(p.recurring_price, p.currency)} {p.recurring_unit || '/mes'}
                       </div>
                     )}
                   </div>
@@ -251,7 +273,7 @@ export function Products() {
                           >
                             <span style={{ flex: 1 }}>{m.name}</span>
                             <span style={{ fontWeight: 700, color: 'var(--teal-700)' }}>
-                              {fmtMoney(m.price)}
+                              {fmtMoney(m.price, p.currency)}
                             </span>
                             {!m.active && (
                               <span className="nx-chip chip-amber" style={{ fontSize: 10 }}>
@@ -324,6 +346,9 @@ export function Products() {
           productRequiresRecurring={
             products.find((p) => p.id === moduleModal.productId)?.requires_recurring ?? false
           }
+          productCurrency={
+            products.find((p) => p.id === moduleModal.productId)?.currency || 'PEN'
+          }
           mode={moduleModal.mode}
           module={moduleModal.module}
           existingIds={products.flatMap((p) => (p.modules || []).map((m) => m.id))}
@@ -372,6 +397,8 @@ function ProductFormModal({
     // v2.18
     requires_recurring: product?.requires_recurring ?? false,
     recurring_monthly_price: product?.recurring_monthly_price || 0,
+    // v2.28
+    currency: product?.currency || 'PEN',
     active: product?.active ?? true,
   });
   const [saving, setSaving] = useState(false);
@@ -418,6 +445,8 @@ function ProductFormModal({
         // v2.18
         requires_recurring: !!form.requires_recurring,
         recurring_monthly_price: Number(form.recurring_monthly_price) || 0,
+        // v2.28
+        currency: form.currency || 'PEN',
       };
       if (mode === 'create') {
         await createProduct(payload);
@@ -472,23 +501,37 @@ function ProductFormModal({
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+          <div className="nx-field">
+            <label className="nx-label">Categoría *</label>
+            <select
+              className="nx-input"
+              value={form.category}
+              onChange={(e) => setForm({ ...form, category: e.target.value as ProductCategory })}
+            >
+              {CATEGORIES.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '110px 1fr', gap: 14 }}>
             <div className="nx-field">
-              <label className="nx-label">Categoría *</label>
+              <label className="nx-label">Moneda *</label>
               <select
                 className="nx-input"
-                value={form.category}
-                onChange={(e) => setForm({ ...form, category: e.target.value as ProductCategory })}
+                value={form.currency || 'PEN'}
+                onChange={(e) => setForm({ ...form, currency: e.target.value as Currency })}
               >
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
+                <option value="PEN">PEN (S/)</option>
+                <option value="USD">USD ($)</option>
               </select>
             </div>
             <div className="nx-field">
-              <label className="nx-label">Precio base (S/)</label>
+              <label className="nx-label">
+                Precio base ({form.currency === 'USD' ? '$' : 'S/'})
+              </label>
               <input
                 className="nx-input"
                 type="number"
@@ -498,6 +541,10 @@ function ProductFormModal({
                 onChange={(e) => setForm({ ...form, base_price: Number(e.target.value) })}
               />
             </div>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--ink-500)', marginTop: -8 }}>
+            La moneda aplica a este producto y a todos sus módulos. Al cotizar, el monto
+            se convierte automáticamente si la cotización está en otra moneda.
           </div>
 
           <div className="nx-field">
@@ -581,7 +628,7 @@ function ProductFormModal({
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 10 }}>
                   <div className="nx-field" style={{ margin: 0 }}>
                     <label className="nx-label" style={{ fontSize: 11 }}>
-                      Precio mensual producto (S/) — fallback
+                      Precio mensual producto ({form.currency === 'USD' ? '$' : 'S/'}) — fallback
                     </label>
                     <input
                       className="nx-input"
@@ -727,6 +774,7 @@ function ProductFormModal({
 function ModuleFormModal({
   productId,
   productRequiresRecurring,
+  productCurrency,
   mode,
   module: mod,
   existingIds,
@@ -735,12 +783,14 @@ function ModuleFormModal({
 }: {
   productId: string;
   productRequiresRecurring: boolean;
+  productCurrency: Currency;
   mode: 'create' | 'edit';
   module?: ProductModule;
   existingIds: string[];
   onClose: () => void;
   onSaved: (msg: string) => void;
 }) {
+  const symbol = productCurrency === 'USD' ? '$' : 'S/';
   const [form, setForm] = useState<ProductModuleInput>({
     id: mod?.id || '',
     product_id: productId,
@@ -833,7 +883,7 @@ function ModuleFormModal({
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
             <div className="nx-field">
-              <label className="nx-label">Precio (S/)</label>
+              <label className="nx-label">Precio ({symbol})</label>
               <input
                 className="nx-input"
                 type="number"
@@ -842,6 +892,9 @@ function ModuleFormModal({
                 value={form.price}
                 onChange={(e) => setForm({ ...form, price: Number(e.target.value) })}
               />
+              <div style={{ fontSize: 10.5, color: 'var(--ink-500)', marginTop: 4 }}>
+                Hereda la moneda <strong>{productCurrency}</strong> del producto padre.
+              </div>
             </div>
             <div className="nx-field">
               <label className="nx-label">Orden</label>
@@ -869,7 +922,7 @@ function ModuleFormModal({
                   className="nx-label"
                   style={{ fontSize: 11.5, color: 'var(--teal-700)', fontWeight: 600 }}
                 >
-                  Renovación mensual (S/)
+                  Renovación mensual ({symbol})
                 </label>
                 <input
                   className="nx-input"
